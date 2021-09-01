@@ -1042,14 +1042,27 @@ const RESOURCE_NAME: &str = "example.com/gpu";
 const RESOURCE_ENDPOINT: &str = "gpu-device-plugin.sock";
 
 #[cfg(target_os = "linux")]
+
 async fn create_device_plugin_resource_pod(
     client: kube::Client,
     pods: &Api<Pod>,
     resource_manager: &mut TestResourceManager,
+    volume_mount: impl AsRef<std::path::Path>,
 ) -> anyhow::Result<()> {
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-    let containers = vec![WasmerciserContainerSpec::named("device-plugin-test")
-        .with_args(&["assert_exists(env:DEVICE_PLUGIN_VAR)"])];
+    let args = [
+        &format!(
+            "write(lit:watermelon)to(file:{})",
+            volume_mount.as_ref().display()
+        ),
+        &format!(
+            "read(file:{})to(var:myfile)",
+            volume_mount.as_ref().display()
+        ),
+        "write(var:myfile)to(stm:stdout)",
+        "assert_exists(env:DEVICE_PLUGIN_VAR)",
+    ];
+    let containers = vec![WasmerciserContainerSpec::named("device-plugin-test").with_args(&args)];
 
     let mut requests = std::collections::BTreeMap::new();
     requests.insert(RESOURCE_NAME.to_string(), Quantity("1".to_string()));
@@ -1078,11 +1091,21 @@ async fn test_pod_with_device_plugin_resource() -> anyhow::Result<()> {
     println!("Starting DP test");
     let test_ns = "wasi-e2e-pod-with-device-plugin-resource";
     let (client, pods, mut resource_manager) = set_up_test(test_ns).await?;
-
-    device_plugin::launch_device_plugin(RESOURCE_NAME, RESOURCE_ENDPOINT).await?;
+    let temp = tempfile::tempdir()?;
+    let file = temp.path();
+    // let file = path.join("foo.txt");
+    // Create file
+    tokio::fs::create_dir_all(&file).await?;
+    device_plugin::launch_device_plugin(RESOURCE_NAME, RESOURCE_ENDPOINT, &file).await?;
 
     // Create a Pod that requests the DP's resource
-    create_device_plugin_resource_pod(client.clone(), &pods, &mut resource_manager).await?;
+    create_device_plugin_resource_pod(
+        client.clone(),
+        &pods,
+        &mut resource_manager,
+        file.join("foo.txt"),
+    )
+    .await?;
     assert::pod_exited_successfully(&pods, DEVICE_PLUGIN_RESOURCE_POD).await?;
 
     Ok(())
